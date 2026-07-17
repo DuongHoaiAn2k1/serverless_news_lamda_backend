@@ -1,0 +1,17 @@
+{
+  "resource": "/articles",
+  "path": "/articles",
+  "httpMethod": "GET",
+  "headers": {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer test-api-key"
+  },
+  "queryStringParameters": {
+    "status": "PENDING",
+    "limit": "20",
+    "offset": "0"
+  },
+  "pathParameters": null,
+  "body": null,
+  "isBase64Encoded": false
+}

@@ -1,0 +1,430 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: BlogNews - AI-powered News Platform Backend
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: nodejs22.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        APP_ENV: !Ref AppEnv
+        LOG_LEVEL: !Ref LogLevel
+        AWS_REGION: !Ref AWS::Region
+        DYNAMODB_TABLE: !Ref ArticlesTable
+        S3_BUCKET: !Ref MediaBucket
+        SQS_QUEUE_URL: !Ref ProcessingQueue
+        BEDROCK_MODEL: !Ref BedrockModelId
+
+Parameters:
+  AppEnv:
+    Type: String
+    Default: development
+    AllowedValues:
+      - development
+      - staging
+      - production
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARN
+      - ERROR
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-sonnet-20240229-v1:0
+
+Resources:
+  # =========================================================
+  # DynamoDB Tables
+  # =========================================================
+  ArticlesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${AWS::StackName}-articles
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: sourceId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+        - AttributeName: EntityType
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: SourceIndex
+          KeySchema:
+            - AttributeName: sourceId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: EntityTypeIndex
+          KeySchema:
+            - AttributeName: EntityType
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # =========================================================
+  # S3 Buckets
+  # =========================================================
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-media-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # =========================================================
+  # SQS Queues
+  # =========================================================
+  ProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-processing
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  ProcessingDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-processing-dlq
+      MessageRetentionPeriod: 604800
+
+  # =========================================================
+  # EventBridge Event Bus
+  # =========================================================
+  EventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub ${AWS::StackName}-event-bus
+
+  # =========================================================
+  # Lambda Functions
+  # =========================================================
+  CollectNewsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/collect/collect-news.handler.handler
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ProcessingQueue.QueueName
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub ${AWS::StackName}-*
+
+  ProcessNewsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/processing/process-news.handler.handler
+      Timeout: 300
+      MemorySize: 512
+      Events:
+        SQSQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ProcessingQueue.Arn
+            BatchSize: 10
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+        - RekognitionDetectOnlyPolicy: {}
+        - BedrockInvokePolicy:
+            ModelId: !Ref BedrockModelId
+
+  PublishArticleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/publish/publish-article.handler.handler
+      Events:
+        ArticleApprovedEvent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !GetAtt EventBus.Arn
+            Pattern:
+              detail-type:
+                - ArticleApproved
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+
+  # =========================================================
+  # Admin API
+  # =========================================================
+  AdminApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref AppEnv
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        ApiKeyRequired: true
+
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/health-check.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /health
+            Method: GET
+
+  GetArticlesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/get-articles.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /articles
+            Method: GET
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ArticlesTable
+
+  GetArticleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/get-article.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /articles/{id}
+            Method: GET
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ArticlesTable
+
+  CreateArticleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/create-article.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /articles
+            Method: POST
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  UpdateArticleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/update-article.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /articles/{id}
+            Method: PUT
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  DeleteArticleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/delete-article.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /articles/{id}
+            Method: DELETE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  GetSourcesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/get-sources.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /sources
+            Method: GET
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ArticlesTable
+
+  UpdateSourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/update-source.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /sources/{id}
+            Method: PUT
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  CreateSourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/create-source.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /sources
+            Method: POST
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  GetSourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/get-source.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /sources/{id}
+            Method: GET
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ArticlesTable
+
+  DeleteSourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/delete-source.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /sources/{id}
+            Method: DELETE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  ToggleSourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/admin/toggle-source.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /sources/{id}/toggle
+            Method: PATCH
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+  # =========================================================
+  # Telegram Webhook
+  # =========================================================
+  TelegramWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handlers/telegram/telegram-webhook.handler.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AdminApi
+            Path: /webhook/telegram
+            Method: POST
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ArticlesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+
+Outputs:
+  AdminApiUrl:
+    Description: Admin API endpoint URL
+    Value: !Sub https://${AdminApi}.execute-api.${AWS::Region}.amazonaws.com/${AppEnv}
+  ProcessingQueueUrl:
+    Description: Processing SQS Queue URL
+    Value: !Ref ProcessingQueue
+  MediaBucketName:
+    Description: Media S3 Bucket Name
+    Value: !Ref MediaBucket
+  ArticlesTableName:
+    Description: Articles DynamoDB Table Name
+    Value: !Ref ArticlesTable
+  EventBusName:
+    Description: EventBridge Event Bus Name
+    Value: !GetAtt EventBus.Name

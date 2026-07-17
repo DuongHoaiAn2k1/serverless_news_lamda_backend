@@ -1,0 +1,23 @@
+version = 1.0
+
+[default]
+[default.global]
+[default.global.parameters]
+stack_name = "blognews-backend"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.local_invoke.parameters]
+container = false
+env_vars = "env.json"
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = [
+  "AppEnv=development",
+  "LogLevel=INFO",
+]

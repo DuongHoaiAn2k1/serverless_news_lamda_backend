@@ -1,0 +1,11 @@
+{
+  "version": "0",
+  "id": "collect-news-event",
+  "detail-type": "Scheduled Event",
+  "source": "aws.events",
+  "account": "123456789012",
+  "time": "2026-07-16T06:00:00Z",
+  "region": "us-east-1",
+  "resources": ["arn:aws:events:us-east-1:123456789012:rule/blognews-collect-news"],
+  "detail": {}
+}

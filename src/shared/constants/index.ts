@@ -1,0 +1,9 @@
+export const PROJECT_NAME = 'BlogNews';
+export const PROJECT_VERSION = '1.0.0';
+export const DEFAULT_PAGE_LIMIT = 20;
+export const MAX_PAGE_LIMIT = 100;
+export const DEFAULT_LANGUAGE = 'en';
+export const MAX_ARTICLE_CONTENT_LENGTH = 100000;
+export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+export const SQS_BATCH_SIZE = 10;
+export const DYNAMODB_MAX_BATCH_SIZE = 25;

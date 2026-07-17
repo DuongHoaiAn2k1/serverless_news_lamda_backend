@@ -1,0 +1,1 @@
+export type { Category, CreateCategoryInput, UpdateCategoryInput } from './category.model.js';
